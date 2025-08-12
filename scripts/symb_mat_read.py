@@ -15,7 +15,17 @@ def find_file_directory(file_name, start_directory):
     return None
 
 username = getpass.getuser()
-symb_dir = find_file_directory('symb_jacobian.txt', ("/home/"+username+"/inspection_ws/src/"))
+# Try multiple possible locations
+possible_locations = [
+    os.path.expanduser("~") + "/inspection_ws/src/",
+    os.path.expanduser("~") + "/Junaidali/catkin_ws/src/",
+    os.path.dirname(os.path.abspath(__file__))  # Current script directory
+]
+
+for location in possible_locations:
+    symb_dir = find_file_directory('symb_jacobian.txt', location)
+    if symb_dir is not None:
+        break
 
 
 with open((symb_dir + "/symb_jacobian.txt"), "r") as inf:
