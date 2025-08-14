@@ -8,6 +8,8 @@ from symb_mat_read import T_lamb
 import tf.transformations as tft
 from incremental_ik import incremental_ik, A_lamb
 import time
+import os
+from datetime import datetime
 
 # ----- Robot parameters -----
 joint_offsets = [0, -np.pi/2, 0, -np.pi/2, np.pi/2, 0]
@@ -25,11 +27,21 @@ JOINT_LIMITS = [(math.radians(lim[0]), math.radians(lim[1])) for lim in JOINT_LI
 RESOLUTION = 0.05  # 5cm voxels
 HALF_RANGE = 0.3
 POSES_PER_VOXEL = 8
-NUM_FK_SAMPLES = 5000
+NUM_FK_SAMPLES = 10000
+
+IK_SUCCESS_COUNT = 0
+IK_FAILURE_COUNT = 0
+IK_TIMEOUT_COUNT = 0
 
 # Estimated reach limits (adjust based on robot specs)
 MAX_THEORETICAL_REACH = 0.4  # 40cm for MyCobot
 MIN_Z = -0.2  # Lowest reachable point
+
+reach_map_file_path = '/home/idac/Junaidali/catkin_ws/src/sampled_reachability_map/maps/'
+reach_map_file_name = 'reach_map_'+str(RESOLUTION)+'_'+datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+
+POSITION_TOLERANCE = 0.005  # 5mm
+ORIENTATION_TOLERANCE = 0.0087  # 0.5° in radians
 
 # ----- Helper functions -----
 def check_joint_vector_within_limits(joint_vector, limits):
@@ -50,6 +62,38 @@ def check_joint_vector_within_limits(joint_vector, limits):
         if not (low <= adjusted[i] <= high):
             return False
     return True
+
+def verify_ik_solution(solution, target_pose):
+    """Rigorous verification of IK solution"""
+    # Apply offsets for FK calculation
+    fk_joints = [s + o for s, o in zip(solution, joint_offsets)]
+    
+    # Compute actual pose
+    T = T_lamb(*fk_joints)
+    achieved_pos = T[:3, 3]
+    achieved_rot = T[:3, :3]
+    
+    # Target pose components
+    target_pos = target_pose[:3, 3]
+    target_rot = target_pose[:3, :3]
+    
+    # Position error (Euclidean distance)
+    pos_error = np.linalg.norm(achieved_pos - target_pos)
+    
+    # Orientation error (Geodesic distance)
+    rot_diff = achieved_rot @ target_rot.T
+    angle = np.arccos(np.clip((np.trace(rot_diff) - 1) / 2, -1.0, 1.0))
+    ori_error = np.abs(angle)
+    
+    # Check joint limits
+    within_limits = check_joint_vector_within_limits(solution, JOINT_LIMITS)
+    
+    # Determine validity
+    valid_position = pos_error < POSITION_TOLERANCE
+    valid_orientation = ori_error < ORIENTATION_TOLERANCE
+    valid_limits = within_limits
+    
+    return pos_error, ori_error, valid_position and valid_orientation and valid_limits
 
 # ----- Kinematics functions -----
 def forward_kinematics(joint_angles):
@@ -72,6 +116,7 @@ def inverse_kinematics(position, orientation, prev_joint_state=None, max_attempt
     - Adds FK verification
     - Proper joint limit handling
     """
+    global IK_SUCCESS_COUNT, IK_FAILURE_COUNT, IK_TIMEOUT_COUNT
     # Convert orientation to transformation matrix
     tf_mat = tft.quaternion_matrix(orientation)
     tf_mat[0:3, 3] = position
@@ -93,36 +138,35 @@ def inverse_kinematics(position, orientation, prev_joint_state=None, max_attempt
             raw_solution = incremental_ik(init_state, tf_mat)
             
             if raw_solution is None:
+                IK_TIMEOUT_COUNT += 1
                 continue
                 
-            # Check joint limits with proper wrapping
-            if not check_joint_vector_within_limits(raw_solution, JOINT_LIMITS):
+            # Rigorous verification
+            pos_error, ori_error, is_valid = verify_ik_solution(raw_solution, tf_mat)
+            
+            if not is_valid:
+                if debug:
+                    rospy.logwarn(f"IK solution invalid: Pos error={pos_error*1000:.2f}mm, "
+                                  f"Ori error={np.degrees(ori_error):.2f}°")
+                IK_FAILURE_COUNT += 1
                 continue
                 
-            # Verify solution with FK
-            # Note: FK expects joints WITH offsets
-            fk_joints = [r + o for r, o in zip(raw_solution, joint_offsets)]
-            achieved_pos, achieved_quat = forward_kinematics(fk_joints)
-            
-            # Calculate errors
-            pos_error = np.linalg.norm(achieved_pos - position)
-            ori_error = 1 - abs(np.dot(orientation, achieved_quat))  # 1 - |dot product|
-            
+            # Calculate combined error (for solution selection)
             total_error = pos_error + ori_error
             
             if total_error < best_error:
                 best_solution = raw_solution
                 best_error = total_error
                 
-            if debug:
-                rospy.loginfo(f"IK attempt: Pos error={pos_error:.4f}m, Ori error={ori_error:.4f}")
+            IK_SUCCESS_COUNT += 1
                 
         except Exception as e:
             if debug:
                 rospy.logwarn(f"IK exception: {str(e)}")
+            IK_FAILURE_COUNT += 1
     
     if best_solution is not None and debug:
-        rospy.loginfo(f"Best IK solution found with error {best_error:.4f}")
+        rospy.loginfo(f"Best IK solution found with error {best_error:.6f}")
         
     return best_solution
 
@@ -179,13 +223,13 @@ def is_pose_reachable(query_pos, query_ori, fk_tree, fk_orientations, joint_samp
         return False
     
     # 2. Broad FK filter
-    cos_half_ori_tol = math.cos(math.radians(ori_tol_deg) / 2.0)
+    cos_half_ori_tol = math.cos(math.radians(ori_tol_deg)) / 2.0
     close_indices = fk_tree.query_ball_point(query_pos, r=pos_tol)
     
-    for idx in close_indices:
-        q_sample = fk_orientations[idx]
-        dot = abs(np.dot(q_sample, query_ori))
-        if dot > cos_half_ori_tol:
+    # Vectorized orientation check
+    if close_indices:
+        dots = np.abs(np.dot(fk_orientations[close_indices], query_ori))
+        if np.any(dots > cos_half_ori_tol):
             return True
     
     # 3. Fallback to IK
@@ -197,6 +241,31 @@ def is_pose_reachable(query_pos, query_ori, fk_tree, fk_orientations, joint_samp
         debug=debug
     )
     return solution is not None
+
+def validate_reachability_map(file_path):
+    with h5py.File(file_path, 'r') as f:
+        spheres = f['/Spheres/sphere_dataset'][:]
+        poses = f['/Poses/pose_dataset'][:]
+    
+    print(f"\nMap Validation Results:")
+    print(f"Voxels: {spheres.shape[0]}")
+    print(f"Poses: {poses.shape[0]}")
+    
+    # Check coverage
+    coverage = spheres.shape[0] / (60**3) * 100  # 60 = 1.2m / 0.02m
+    print(f"Workspace Coverage: {coverage:.1f}%")
+    
+    # Check orientation quality
+    quats = poses[:, 3:7]
+    magnitudes = np.linalg.norm(quats, axis=1)
+    invalid_quats = np.sum((magnitudes < 0.999) | (magnitudes > 1.001))
+    print(f"Invalid orientations: {invalid_quats}/{len(poses)}")
+    
+    # Check reachability distribution
+    reachability = spheres[:, 3]
+    print("\nReachability Distribution:")
+    for p in [0, 25, 50, 75, 100]:
+        print(f"{p}% voxels: {np.percentile(reachability, p):.1f}% reachable")
 
 # ----- Main map generation -----
 def create_reachability_map():
@@ -210,19 +279,16 @@ def create_reachability_map():
     
     # 2. Compute FK
     rospy.loginfo("Computing forward kinematics...")
-    fk_positions = []
-    fk_orientations = []
-    for i, angles in enumerate(joint_samples):
-        pos, quat = forward_kinematics(angles)
-        fk_positions.append(pos)
-        fk_orientations.append(quat)
-        
-        # Progress logging
-        if i % 1000 == 0:
+    fk_positions = np.empty((NUM_FK_SAMPLES, 3), dtype=np.float32)
+    fk_orientations = np.empty((NUM_FK_SAMPLES, 4), dtype=np.float32)
+
+    for i in range(NUM_FK_SAMPLES):
+        if i % 100000 == 0:
             rospy.loginfo(f"FK computed for {i}/{NUM_FK_SAMPLES} samples")
-    
-    fk_positions = np.array(fk_positions)
-    fk_orientations = np.array(fk_orientations)
+        
+        pos, quat = forward_kinematics(joint_samples[i])
+        fk_positions[i] = pos
+        fk_orientations[i] = quat
     
     # Build KDTree for fast position search
     fk_tree = KDTree(fk_positions)
@@ -250,8 +316,16 @@ def create_reachability_map():
     total_poses = num_voxels * POSES_PER_VOXEL
     processed_poses = 0
     start_loop_time = time.time()
+    last_log_time = start_loop_time
     
     for i, center in enumerate(voxel_centers):
+        if i % 100 == 0:  # Log every 100 voxels
+            elapsed = time.time() - start_time
+            rospy.loginfo(
+                f"Voxel {i}/{num_voxels} | "
+                f"Elapsed: {elapsed/60:.1f} min | "
+                f"ETA: {(elapsed/(i+1))*(num_voxels-i)/60:.1f} min"
+            )
         # Skip unreachable areas
         if np.linalg.norm(center) > max_reach:
             processed_poses += POSES_PER_VOXEL
@@ -275,17 +349,15 @@ def create_reachability_map():
             
             # Log progress every 60 seconds
             current_time = time.time()
-            if current_time - start_loop_time > 60:
+            if current_time - last_log_time > 60:
                 elapsed_total = current_time - start_time
-                elapsed_loop = current_time - start_loop_time
                 progress = processed_poses / total_poses * 100
                 rospy.loginfo(
                     f"Progress: {progress:.1f}% | "
                     f"Poses: {processed_poses}/{total_poses} | "
-                    f"Elapsed: {elapsed_total/60:.1f} min | "
-                    f"Rate: {processed_poses/elapsed_loop:.1f} poses/s"
+                    f"Elapsed: {elapsed_total/60:.1f} min"
                 )
-                start_loop_time = current_time
+                last_log_time = current_time
                 
         # Update reachability index after each voxel
         count_reachable = np.count_nonzero(reachable_flags[i])
@@ -313,9 +385,9 @@ def create_reachability_map():
     reachable_poses = np.array(reachable_poses, dtype=float)
     
     # 7. Save the data in HDF5 format (with structure compatible with ROS reachability map tools)
-    output_file = "mycobot_reachability_map.h5"
-    rospy.loginfo(f"Saving reachability map to {output_file} ...")
-    with h5py.File(output_file, 'w') as f:
+    # output_file = "mycobot_reachability_map.h5"
+    rospy.loginfo(f"[Will save file named: \'{reach_map_file_name}\' at path: \'{reach_map_file_path}\']")
+    with h5py.File(reach_map_file_path+"3D_"+reach_map_file_name+".h5", 'w') as f:
         # Create group for spheres (voxels)
         sphere_group = f.create_group('/Spheres')
         # Create dataset for sphere centers and reachability index
@@ -333,6 +405,8 @@ def create_reachability_map():
     
     total_time = time.time() - start_time
     rospy.loginfo(f"Map generation completed in {total_time/60:.1f} minutes")
+
+    validate_reachability_map(reach_map_file_path+"3D_"+reach_map_file_name+".h5")
 
 # Run as script
 if __name__ == "__main__":

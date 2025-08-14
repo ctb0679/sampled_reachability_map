@@ -40,12 +40,12 @@ def check_joint_vector_within_limits(joint_vector, limits):
 
 
 # Provide q_currrent as an array of current joint angles and goal pose as a transformation matrix
-def incremental_ik(init_joint_state, goal, steps = 1000, tol=0.001):
-
+def incremental_ik(init_joint_state, goal, steps = 1000, tol=0.001, max_restarts=10):
+    restarts = 0
     q_current = init_joint_state
 
     #Iterate till we achieve satisfactory results
-    while(True):
+    while restarts < max_restarts:
         current_pose = A_lamb(*(q_current))
 
         #get the goal pose in (12,1) vector
@@ -76,7 +76,11 @@ def incremental_ik(init_joint_state, goal, steps = 1000, tol=0.001):
         if (limit_check == True):
             break
         else:
+            restarts += 1
             q_current = generate_random_vector()
             continue
+
+    if restarts >= max_restarts:
+        return None  # Failed after max restarts
 
     return q_current

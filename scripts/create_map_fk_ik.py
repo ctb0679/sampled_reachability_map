@@ -22,10 +22,10 @@ JOINT_LIMITS_DEG = [
     ]
 JOINT_LIMITS = [(math.radians(lim[0]), math.radians(lim[1])) for lim in JOINT_LIMITS_DEG]
 
-RESOLUTION = 0.05  # 0.02 m
+RESOLUTION = 0.02  # 0.02 m
 HALF_RANGE = 0.3
-POSES_PER_VOXEL = 8
-NUM_FK_SAMPLES = 5000
+POSES_PER_VOXEL = 32
+NUM_FK_SAMPLES = 100000000
 
 # ----- Helper functions -----
 def check_joint_vector_within_limits(joint_angles, joint_limits):
