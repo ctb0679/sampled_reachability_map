@@ -1,0 +1,29 @@
+<launch>
+    <!-- Original parameters -->
+    <arg name="model" default="$(find mycobot_description)/urdf/mycobot/mycobot_urdf.urdf"/>
+    <arg name="rvizconfig" default="$(find sampled_reachability_map)/rviz/mycobot.rviz" />
+    <arg name="gui" default="true" />
+    
+    <!-- New parameters for reachability map -->
+    <arg name="map_path" default="$(find sampled_reachability_map)/maps/3D_reach_map_0.03_2025-08-14-15-31-51.h5"/>
+    <arg name="show_poses" default="false"/>
+    
+    <param name="robot_description" command="$(find xacro)/xacro --inorder $(arg model)" />
+
+    <!-- Combine joint values to TF -->
+    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" />
+    <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher">
+        <param name="use_gui" value="$(arg gui)" />
+    </node>
+    
+    <!-- Reachability Visualizer -->
+    <node name="reachability_visualizer" pkg="sampled_reachability_map" 
+          type="visualize_reachability.py" output="screen">
+        <param name="map_path" value="$(arg map_path)" />
+        <param name="show_poses" value="$(arg show_poses)" />
+    </node>
+    
+    <!-- Show in Rviz with updated config -->
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(arg rvizconfig)" required="true" />
+    
+</launch>
