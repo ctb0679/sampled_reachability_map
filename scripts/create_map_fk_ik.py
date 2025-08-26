@@ -26,7 +26,7 @@ JOINT_LIMITS_DEG = [
     ]
 JOINT_LIMITS = [(math.radians(lim[0]), math.radians(lim[1])) for lim in JOINT_LIMITS_DEG]
 
-RESOLUTION = 0.02  # 5cm voxels
+RESOLUTION = 0.02  # 2cm voxels
 HALF_RANGE = 0.3
 POSES_PER_VOXEL = 32
 NUM_FK_SAMPLES = 10000000
