@@ -26,7 +26,7 @@ JOINT_LIMITS = [(math.radians(lim[0]), math.radians(lim[1])) for lim in JOINT_LI
 RESOLUTION = 0.02  # 5cm voxels
 HALF_RANGE = 0.3   # 60cm cube workspace
 POSES_PER_VOXEL = 32
-NUM_FK_SAMPLES = 1000000  # Reduced from 50K for faster testing
+NUM_FK_SAMPLES = 10000000  # Reduced from 50K for faster testing
 
 name_end_effector = "joint6_flange" # "arm_left_tool_link"
 name_base_link = "joint1"
