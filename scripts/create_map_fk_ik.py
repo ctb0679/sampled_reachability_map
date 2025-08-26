@@ -10,6 +10,8 @@ from incremental_ik import incremental_ik, A_lamb
 import time
 import os
 from datetime import datetime
+from multiprocessing import Pool, cpu_count, Manager
+import multiprocessing as mp
 
 # ----- Robot parameters -----
 joint_offsets = [0, -np.pi/2, 0, -np.pi/2, np.pi/2, 0]
@@ -27,7 +29,7 @@ JOINT_LIMITS = [(math.radians(lim[0]), math.radians(lim[1])) for lim in JOINT_LI
 RESOLUTION = 0.02  # 5cm voxels
 HALF_RANGE = 0.3
 POSES_PER_VOXEL = 32
-NUM_FK_SAMPLES = 1000000000
+NUM_FK_SAMPLES = 10000000
 
 IK_SUCCESS_COUNT = 0
 IK_FAILURE_COUNT = 0
@@ -283,7 +285,7 @@ def create_reachability_map():
     fk_orientations = np.empty((NUM_FK_SAMPLES, 4), dtype=np.float32)
 
     for i in range(NUM_FK_SAMPLES):
-        if i % 1000 == 0:
+        if i % 100000 == 0:
             rospy.loginfo(f"FK computed for {i}/{NUM_FK_SAMPLES} samples")
         
         pos, quat = forward_kinematics(joint_samples[i])
