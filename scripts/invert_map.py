@@ -379,8 +379,9 @@ def create_inverse_reachability_map(reach_map_path):
 if __name__ == "__main__":
     try:
         # Example usage: specify the reachability map file path
-        reachability_map_file = "3D_reach_map_0.03_2025-08-14-15-31-51.h5"
-        create_inverse_reachability_map(reachability_map_file)
+        reach_map_file = '/home/idac/Junaidali/catkin_ws/src/sampled_reachability_map/maps/3D_reach_map_0.03_2025-08-14-15-31-51.h5'
+        # reachability_map_file = "3D_reach_map_0.03_2025-08-14-15-31-51.h5"
+        create_inverse_reachability_map(reach_map_file)
     except rospy.ROSInterruptException:
         rospy.logerr("Inverse reachability map generation interrupted before completion.")
     except Exception as e:

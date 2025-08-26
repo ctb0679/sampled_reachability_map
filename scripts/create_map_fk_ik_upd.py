@@ -8,6 +8,7 @@ from symb_mat_read import T_lamb
 import tf.transformations as tft
 from incremental_ik import incremental_ik
 import time
+from datetime import datetime
 
 # ----- Robot parameters -----
 joint_offsets = [0, -np.pi/2, 0, -np.pi/2, np.pi/2, 0]
@@ -26,6 +27,9 @@ RESOLUTION = 0.02  # 0.02 m
 HALF_RANGE = 0.3
 POSES_PER_VOXEL = 32
 NUM_FK_SAMPLES = 100000000
+
+reach_map_file_name = 'reach_map_'+str(RESOLUTION)+'_'+datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+reach_map_file_path = '/home/idac/Junaidali/catkin_ws/src/sampled_reachability_map/maps/'
 
 # ----- Helper functions -----
 def check_joint_vector_within_limits(joint_angles, joint_limits):
@@ -295,9 +299,8 @@ def create_reachability_map():
     reachable_poses = np.array(reachable_poses, dtype=float)
     
     # 7. Save the data in HDF5 format (with structure compatible with ROS reachability map tools)
-    output_file = "mycobot_reachability_map.h5"
-    rospy.loginfo(f"Saving reachability map to {output_file} ...")
-    with h5py.File(output_file, 'w') as f:
+    rospy.loginfo(f"[Will save file named: \'{reach_map_file_name}\' at path: \'{reach_map_file_path}\']")
+    with h5py.File(reach_map_file_path+"3D_"+reach_map_file_name+".h5", 'w') as f:
         # Create group for spheres (voxels)
         sphere_group = f.create_group('/Spheres')
         # Create dataset for sphere centers and reachability index

@@ -31,7 +31,7 @@ NUM_FK_SAMPLES = 10000000  # Reduced from 50K for faster testing
 name_end_effector = "joint6_flange" # "arm_left_tool_link"
 name_base_link = "joint1"
 reach_map_file_name = 'reach_map_'+str(name_end_effector)+'_'+str(RESOLUTION)+'_'+datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-reach_map_file_path = '/home/junaidali/inspection_ws/src/sampled_reachability_map/maps/'
+reach_map_file_path = '/home/idac/Junaidali/catkin_ws/src/sampled_reachability_map/maps/'
 
 # ----- Kinematics functions -----
 def forward_kinematics(joint_angles):
