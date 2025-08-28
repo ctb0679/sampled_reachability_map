@@ -10,6 +10,8 @@ from incremental_ik import incremental_ik, A_lamb
 import time
 import os
 from datetime import datetime
+from multiprocessing import Pool, cpu_count
+import multiprocessing as mp
 
 # ----- Robot parameters -----
 joint_offsets = [0, -np.pi/2, 0, -np.pi/2, np.pi/2, 0]
@@ -38,7 +40,7 @@ MAX_THEORETICAL_REACH = 0.4  # 40cm for MyCobot
 MIN_Z = -0.2  # Lowest reachable point
 
 reach_map_file_path = '/home/idac/Junaidali/catkin_ws/src/sampled_reachability_map/maps/'
-reach_map_file_name = 'reach_map_'+str(RESOLUTION)+'_'+datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+reach_map_file_name = 'reach_map_'+str(RESOLUTION)+'_'+str(POSES_PER_VOXEL)+'_'+str(NUM_FK_SAMPLES)+'_'+datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
 POSITION_TOLERANCE = 0.005  # 5mm
 ORIENTATION_TOLERANCE = 0.0087  # 0.5° in radians
@@ -215,8 +217,8 @@ def generate_sphere_orientations(num_orientations):
     return orientations
 
 def is_pose_reachable(query_pos, query_ori, fk_tree, fk_orientations, joint_samples, 
-                      pos_tol=0.05, ori_tol_deg=25.0, debug=False):
-    """Optimized reachability check with pre-filter"""
+                               initial_states=None, pos_tol=0.05, ori_tol_deg=25.0):
+    """Optimized reachability check with multiple initial states"""
     # 1. Quick out-of-reach check
     if (np.linalg.norm(query_pos) > MAX_THEORETICAL_REACH or 
         query_pos[2] < MIN_Z):
@@ -232,15 +234,48 @@ def is_pose_reachable(query_pos, query_ori, fk_tree, fk_orientations, joint_samp
         if np.any(dots > cos_half_ori_tol):
             return True
     
-    # 3. Fallback to IK
-    _, closest_idx = fk_tree.query(query_pos)
+    # 3. Fallback to IK with multiple initial states
+    if initial_states is None:
+        _, closest_idx = fk_tree.query(query_pos)
+        initial_states = [joint_samples[closest_idx]]
+    
     solution = inverse_kinematics(
         query_pos, 
         query_ori, 
-        prev_joint_state=joint_samples[closest_idx],
-        debug=debug
+        initial_states=initial_states,
+        debug=False
     )
     return solution is not None
+
+def process_voxel(args):
+    """Process a single voxel in parallel"""
+    i, center, fk_positions, fk_orientations, joint_samples, sphere_orientations, max_reach = args
+    flags = [False] * len(sphere_orientations)
+    
+    # Skip unreachable areas
+    if np.linalg.norm(center) > max_reach:
+        return i, flags
+        
+    # Build local KDTree for this worker
+    fk_tree = KDTree(fk_positions)
+    
+    # Get multiple initial states from nearest neighbors
+    _, indices = fk_tree.query(center, k=min(5, len(fk_positions)))
+    initial_states = [joint_samples[idx] for idx in indices]
+    
+    for j, quat in enumerate(sphere_orientations):
+        # Use optimized reachability check with multiple initial states
+        if is_pose_reachable(
+            center, 
+            quat, 
+            fk_tree, 
+            fk_orientations, 
+            joint_samples,
+            initial_states=initial_states
+        ):
+            flags[j] = True
+            
+    return i, flags
 
 def validate_reachability_map(file_path):
     with h5py.File(file_path, 'r') as f:
@@ -276,6 +311,7 @@ def create_reachability_map():
     # 1. Sample joints
     rospy.loginfo(f"Sampling {NUM_FK_SAMPLES} joint configurations...")
     joint_samples = sample_joint_positions(NUM_FK_SAMPLES, JOINT_LIMITS)
+    joint_samples = joint_samples.astype(np.float32)
     
     # 2. Compute FK
     rospy.loginfo("Computing forward kinematics...")
@@ -308,58 +344,48 @@ def create_reachability_map():
     reachability_index = np.zeros(num_voxels, dtype=float)
     reachable_flags = np.zeros((num_voxels, POSES_PER_VOXEL), dtype=bool)
     
-    # 5. Main processing loop
+    # 5. Main processing loop - PARALLEL
     max_reach = np.linalg.norm(fk_positions, axis=1).max() + 0.01
-    rospy.loginfo("Starting reachability checks...")
-    
-    # Progress tracking
-    total_poses = num_voxels * POSES_PER_VOXEL
-    processed_poses = 0
+    rospy.loginfo("Starting parallel reachability checks...")
+
+    # Prepare arguments for parallel processing
+    args = [(i, center, fk_positions, fk_orientations, joint_samples, 
+            sphere_orientations, max_reach) 
+            for i, center in enumerate(voxel_centers)]
+
+    # Use 75% of available cores to avoid memory issues
+    num_workers = max(1, int(cpu_count() * 0.75))
+    rospy.loginfo(f"Using {num_workers} parallel workers")
+
+    # Process in parallel
     start_loop_time = time.time()
-    last_log_time = start_loop_time
-    
-    for i, center in enumerate(voxel_centers):
-        if i % 100 == 0:  # Log every 100 voxels
-            elapsed = time.time() - start_time
-            rospy.loginfo(
-                f"Voxel {i}/{num_voxels} | "
-                f"Elapsed: {elapsed/60:.1f} min | "
-                f"ETA: {(elapsed/(i+1))*(num_voxels-i)/60:.1f} min"
-            )
-        # Skip unreachable areas
-        if np.linalg.norm(center) > max_reach:
-            processed_poses += POSES_PER_VOXEL
-            continue
-            
-        # Only debug first voxel
-        debug_this_voxel = (i == 0)
+    with Pool(processes=num_workers) as pool:
+        results = []
+        total_voxels = len(voxel_centers)
         
-        for j, quat in enumerate(sphere_orientations):
-            if is_pose_reachable(
-                center, 
-                quat, 
-                fk_tree, 
-                fk_orientations, 
-                joint_samples,
-                debug=debug_this_voxel
-            ):
-                reachable_flags[i, j] = True
-                
-            processed_poses += 1
+        # Process chunks to allow progress logging
+        chunk_size = 100
+        for idx in range(0, total_voxels, chunk_size):
+            chunk = args[idx:idx+chunk_size]
+            chunk_results = pool.map(process_voxel, chunk)
             
-            # Log progress every 60 seconds
-            current_time = time.time()
-            if current_time - last_log_time > 60:
-                elapsed_total = current_time - start_time
-                progress = processed_poses / total_poses * 100
-                rospy.loginfo(
-                    f"Progress: {progress:.1f}% | "
-                    f"Poses: {processed_poses}/{total_poses} | "
-                    f"Elapsed: {elapsed_total/60:.1f} min"
-                )
-                last_log_time = current_time
+            # Store results
+            for i, flags in chunk_results:
+                reachable_flags[i] = flags
                 
-        # Update reachability index after each voxel
+            # Progress logging
+            elapsed = time.time() - start_loop_time
+            processed = min(idx + chunk_size, total_voxels)
+            progress = processed / total_voxels * 100
+            rospy.loginfo(
+                f"Progress: {progress:.1f}% | "
+                f"Voxels: {processed}/{total_voxels} | "
+                f"Elapsed: {elapsed/60:.1f} min | "
+                f"ETA: {(elapsed/progress)*(100-progress)/60:.1f} min"
+            )
+
+    # Update reachability index
+    for i in range(num_voxels):
         count_reachable = np.count_nonzero(reachable_flags[i])
         reachability_index[i] = (count_reachable / POSES_PER_VOXEL) * 100.0
     
